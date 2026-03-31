@@ -7,6 +7,8 @@ import com.payroll.backend.lineitem.LineItemRepository;
 import com.payroll.backend.lineitem.LineItemType;
 import com.payroll.backend.merchant.Merchant;
 import com.payroll.backend.merchant.MerchantRepository;
+import com.payroll.backend.user.User;
+import com.payroll.backend.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,15 +19,21 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
 public class CsvImportService {
 
+    private static final Pattern CSV_SPLIT_PATTERN = Pattern.compile(",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)");
+    private static final Pattern NUMERIC_PATTERN = Pattern.compile("\\d+");
+    private static final Pattern TRAILING_ID_PATTERN = Pattern.compile("\\s*\\([^)]*\\d[^)]*\\)\\s*$");
+
     private final BatchRepository batchRepository;
     private final MerchantRepository merchantRepository;
     private final LineItemRepository lineItemRepository;
+    private final UserRepository userRepository;
 
     @Transactional
     public ImportSummaryResponse importCsv(MultipartFile file, String batchName) throws IOException {
@@ -40,225 +48,279 @@ public class CsvImportService {
         Batch newBatch = new Batch();
         newBatch.setName(batchName);
         newBatch.setCreatedAt(LocalDateTime.now());
-
         Batch batch = batchRepository.save(newBatch);
 
-        Map<Long, MerchantAggregate> merchantMap = new HashMap<>();
-        List<ParsedLineItem> parsedAdditions = new ArrayList<>();
-        List<ParsedLineItem> parsedDeductions = new ArrayList<>();
+        Map<Long, MerchantAggregate> merchantMap = new LinkedHashMap<>();
+        List<ParsedLineItem> parsedLineItems = new ArrayList<>();
 
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(file.getInputStream()))) {
-            parseCsv(reader, merchantMap, parsedAdditions, parsedDeductions);
+            parseCsv(reader, merchantMap, parsedLineItems);
         }
 
         Long previousBatchId = batchRepository.findTopByOrderByIdDesc()
-                .filter(b -> !b.getId().equals(batch.getId()))
+                .filter(existing -> !existing.getId().equals(batch.getId()))
                 .map(Batch::getId)
-                .orElseGet(() -> {
-                    List<Batch> batches = batchRepository.findAll().stream()
-                            .filter(b -> !b.getId().equals(batch.getId()))
-                            .sorted(Comparator.comparing(Batch::getId).reversed())
-                            .toList();
-                    return batches.isEmpty() ? null : batches.get(0).getId();
-                });
+                .orElse(null);
 
-        Set<Long> previousMerchantIds = new HashSet<>();
-        if (previousBatchId != null) {
-            previousMerchantIds = merchantRepository.findByBatchId(previousBatchId).stream()
-                    .map(Merchant::getExternalMerchantId)
-                    .collect(Collectors.toSet());
-        }
+        Set<Long> previousMerchantIds = previousBatchId == null
+                ? Set.of()
+                : merchantRepository.findByBatchId(previousBatchId).stream()
+                .map(Merchant::getExternalMerchantId)
+                .collect(Collectors.toSet());
 
-        List<Merchant> merchantsToSave = new ArrayList<>();
-        for (MerchantAggregate agg : merchantMap.values()) {
-            Merchant merchant = new Merchant();
-            merchant.setExternalMerchantId(agg.externalMerchantId);
-            merchant.setBatch(batch);
-            merchant.setName(agg.name);
-            merchant.setTransactions(agg.transactions);
-            merchant.setSalesAmount(agg.salesAmount);
-            merchant.setIncome(agg.income);
-            merchant.setExpenses(agg.expenses);
-            merchant.setNet(agg.net);
-            merchant.setBps(agg.bps);
-            merchant.setPercentage(agg.percentage);
-            merchant.setAgentNet(agg.agentNet);
-            merchant.setProcessor(agg.processor);
-            merchant.setIsNew(!previousMerchantIds.contains(agg.externalMerchantId));
-            merchantsToSave.add(merchant);
-        }
-
+        List<Merchant> merchantsToSave = merchantMap.values().stream()
+                .map(aggregate -> toMerchant(batch, aggregate, previousMerchantIds))
+                .toList();
         List<Merchant> savedMerchants = merchantRepository.saveAll(merchantsToSave);
+        Map<Long, Merchant> merchantsByExternalId = savedMerchants.stream()
+                .collect(Collectors.toMap(Merchant::getExternalMerchantId, merchant -> merchant));
 
-        Map<Long, Merchant> savedMerchantByExternalId = savedMerchants.stream()
-                .collect(Collectors.toMap(Merchant::getExternalMerchantId, m -> m));
+        Map<String, User> usersByName = userRepository.findAll().stream()
+                .collect(Collectors.toMap(
+                        user -> canonicalizeName(user.getDisplayName()),
+                        user -> user,
+                        (left, right) -> left
+                ));
+        userRepository.findAll().forEach(user -> usersByName.putIfAbsent(canonicalizeName(user.getUsername()), user));
 
-        List<LineItem> lineItemsToSave = new ArrayList<>();
+        List<LineItem> lineItems = parsedLineItems.stream()
+                .map(item -> toLineItem(batch, item, merchantsByExternalId, usersByName))
+                .toList();
+        lineItemRepository.saveAll(lineItems);
 
-        for (ParsedLineItem item : parsedDeductions) {
-            Merchant merchant = savedMerchantByExternalId.get(item.externalMerchantId);
-            if (merchant != null) {
-                LineItem lineItem = new LineItem();
-                lineItem.setMerchant(merchant);
-                lineItem.setType(LineItemType.DEDUCTION);
-                lineItem.setDescription(item.description);
-                lineItem.setAmount(item.amount);
-                lineItemsToSave.add(lineItem);
-            }
-        }
-
-        for (ParsedLineItem item : parsedAdditions) {
-            Merchant merchant = savedMerchantByExternalId.get(item.externalMerchantId);
-            if (merchant != null) {
-                LineItem lineItem = new LineItem();
-                lineItem.setMerchant(merchant);
-                lineItem.setType(LineItemType.ADDITION);
-                lineItem.setDescription(item.description);
-                lineItem.setAmount(item.amount);
-                lineItemsToSave.add(lineItem);
-            }
-        }
-
-        lineItemRepository.saveAll(lineItemsToSave);
-
-        int newMerchantCount = (int) savedMerchants.stream()
-                .filter(m -> Boolean.TRUE.equals(m.getIsNew()))
-                .count();
+        int additionsImported = (int) lineItems.stream().filter(item -> item.getType() == LineItemType.ADDITION).count();
+        int deductionsImported = (int) lineItems.stream().filter(item -> item.getType() == LineItemType.DEDUCTION).count();
+        int newMerchantCount = (int) savedMerchants.stream().filter(merchant -> Boolean.TRUE.equals(merchant.getIsNew())).count();
 
         return new ImportSummaryResponse(
                 batch.getId(),
                 batch.getName(),
                 savedMerchants.size(),
                 newMerchantCount,
-                parsedAdditions.size(),
-                parsedDeductions.size()
+                additionsImported,
+                deductionsImported
         );
     }
 
     private void parseCsv(
             BufferedReader reader,
             Map<Long, MerchantAggregate> merchantMap,
-            List<ParsedLineItem> additions,
-            List<ParsedLineItem> deductions
+            List<ParsedLineItem> parsedLineItems
     ) throws IOException {
-
-        String line;
-        boolean isHeaderRow = false;
         String mode = "NONE";
-
+        String currentProcessor = null;
+        String line;
         while ((line = reader.readLine()) != null) {
-            if (line.trim().isEmpty()
-                    || line.contains("Records exported:")
-                    || line.startsWith("\"\"")
-                    || line.startsWith("\"Type\"")
-                    || line.contains("Grand Total")) {
+            String trimmed = line.trim();
+            if (trimmed.isEmpty() || trimmed.startsWith("Records exported:")) {
                 continue;
             }
-
-            if (line.contains("Residuals -")) {
+            if (trimmed.startsWith("Grand Total")) {
+                break;
+            }
+            if (trimmed.startsWith("Residuals -")) {
                 mode = "RESIDUALS";
-                isHeaderRow = true;
+                currentProcessor = extractProcessor(trimmed);
                 continue;
-            } else if (line.contains("Lineitems - Deductions")) {
-                mode = "DEDUCTIONS";
-                isHeaderRow = true;
-                continue;
-            } else if (line.contains("Lineitems - Additions")) {
+            }
+            if (trimmed.startsWith("Lineitems - Additions")) {
                 mode = "ADDITIONS";
-                isHeaderRow = true;
+                continue;
+            }
+            if (trimmed.startsWith("Lineitems - Deductions")) {
+                mode = "DEDUCTIONS";
+                continue;
+            }
+            if (trimmed.startsWith("\"Merchant ID\"") || trimmed.startsWith("\"MID\"") || trimmed.startsWith("\"Type\"")) {
                 continue;
             }
 
-            if (line.startsWith("\"Merchant ID") || line.startsWith("\"MID") || isHeaderRow) {
-                isHeaderRow = false;
-                continue;
-            }
-
-            String[] fields = line.split(",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)");
-            if (fields.length < 6) {
-                continue;
-            }
-
-            try {
-                String idRaw = clean(fields[0]);
-                if (idRaw.isEmpty()) {
-                    continue;
+            String[] fields = CSV_SPLIT_PATTERN.split(line, -1);
+            switch (mode) {
+                case "RESIDUALS" -> parseResidualRow(fields, merchantMap, currentProcessor);
+                case "ADDITIONS" -> parseLineItemRow(fields, merchantMap, parsedLineItems, LineItemType.ADDITION);
+                case "DEDUCTIONS" -> parseLineItemRow(fields, merchantMap, parsedLineItems, LineItemType.DEDUCTION);
+                default -> {
                 }
-
-                long externalMerchantId = Long.parseLong(idRaw);
-
-                if ("RESIDUALS".equals(mode)) {
-                    MerchantAggregate agg = merchantMap.computeIfAbsent(
-                            externalMerchantId,
-                            id -> new MerchantAggregate()
-                    );
-
-                    agg.externalMerchantId = externalMerchantId;
-                    agg.name = fields.length > 1 ? clean(fields[1]) : "";
-                    agg.transactions += parseInt(fields, 2);
-                    agg.salesAmount += parseDouble(fields, 3);
-                    agg.income += parseDouble(fields, 4);
-                    agg.expenses += parseDouble(fields, 5);
-                    agg.net += parseDouble(fields, 6);
-                    agg.bps += parseDouble(fields, 7);
-                    agg.percentage += parseDouble(fields, 8);
-                    agg.agentNet += parseDouble(fields, 9);
-                } else if ("DEDUCTIONS".equals(mode) || "ADDITIONS".equals(mode)) {
-                    String description = fields.length > 2 ? clean(fields[2]) : "";
-                    double amount = parseDouble(fields, 5);
-
-                    ParsedLineItem item = new ParsedLineItem();
-                    item.externalMerchantId = externalMerchantId;
-                    item.description = description;
-                    item.amount = amount;
-
-                    if ("DEDUCTIONS".equals(mode)) {
-                        deductions.add(item);
-                    } else {
-                        additions.add(item);
-                    }
-                }
-
-            } catch (Exception ignored) {
             }
         }
     }
 
-    private String clean(String value) {
-        return value == null ? "" : value.replace("\"", "").trim();
+    private void parseResidualRow(String[] fields, Map<Long, MerchantAggregate> merchantMap, String processor) {
+        String merchantIdRaw = clean(fields, 0);
+        if (!isNumeric(merchantIdRaw)) {
+            return;
+        }
+
+        long merchantId = Long.parseLong(merchantIdRaw);
+        MerchantAggregate aggregate = merchantMap.computeIfAbsent(merchantId, ignored -> new MerchantAggregate());
+        aggregate.externalMerchantId = merchantId;
+        aggregate.name = chooseName(aggregate.name, clean(fields, 1));
+        aggregate.transactions += parseInt(fields, 2);
+        aggregate.salesAmount += parseDouble(fields, 3);
+        aggregate.grossProfit += parseDouble(fields, 4);
+        aggregate.deductions += parseDouble(fields, 5);
+        aggregate.netProfit += parseDouble(fields, 6);
+        aggregate.agentNet += parseDouble(fields, 9);
+        aggregate.processor = chooseName(aggregate.processor, processor);
     }
 
-    private int parseInt(String[] fields, int index) {
-        if (index >= fields.length) return 0;
-        String value = clean(fields[index]);
-        if (value.isEmpty()) return 0;
-        return Integer.parseInt(value);
+    private void parseLineItemRow(
+            String[] fields,
+            Map<Long, MerchantAggregate> merchantMap,
+            List<ParsedLineItem> parsedLineItems,
+            LineItemType type
+    ) {
+        String subjectRaw = clean(fields, 1);
+        if (subjectRaw.equalsIgnoreCase("Total") || subjectRaw.isEmpty()) {
+            return;
+        }
+
+        String merchantIdRaw = clean(fields, 0);
+        Long merchantId = isNumeric(merchantIdRaw) ? Long.parseLong(merchantIdRaw) : null;
+
+        ParsedLineItem item = new ParsedLineItem();
+        item.externalMerchantId = merchantId;
+        item.subjectName = stripSubjectName(subjectRaw);
+        item.description = clean(fields, 2);
+        item.income = parseDouble(fields, 3);
+        item.expenses = parseDouble(fields, 4);
+        item.net = parseDouble(fields, 5);
+        item.percentage = parsePercentage(fields, 6);
+        item.agentNet = parseDouble(fields, 7);
+        item.type = type;
+        parsedLineItems.add(item);
+
+        if (merchantId != null) {
+            MerchantAggregate aggregate = merchantMap.computeIfAbsent(merchantId, ignored -> new MerchantAggregate());
+            aggregate.externalMerchantId = merchantId;
+            aggregate.name = chooseName(aggregate.name, item.subjectName);
+            if (aggregate.processor == null) {
+                aggregate.processor = "Line Item Only";
+            }
+        }
     }
 
-    private double parseDouble(String[] fields, int index) {
-        if (index >= fields.length) return 0.0;
-        String value = clean(fields[index]);
-        if (value.isEmpty()) return 0.0;
-        return Double.parseDouble(value);
+    private Merchant toMerchant(Batch batch, MerchantAggregate aggregate, Set<Long> previousMerchantIds) {
+        Merchant merchant = new Merchant();
+        merchant.setExternalMerchantId(aggregate.externalMerchantId);
+        merchant.setBatch(batch);
+        merchant.setName(aggregate.name == null ? String.valueOf(aggregate.externalMerchantId) : aggregate.name);
+        merchant.setTransactions(aggregate.transactions);
+        merchant.setSalesAmount(aggregate.salesAmount);
+        merchant.setIncome(aggregate.grossProfit);
+        merchant.setExpenses(aggregate.deductions);
+        merchant.setNet(aggregate.netProfit);
+        merchant.setAgentNet(aggregate.agentNet);
+        merchant.setProcessor(aggregate.processor);
+        merchant.setBps(aggregate.salesAmount == 0 ? 0.0 : (aggregate.netProfit / aggregate.salesAmount) * 10000);
+        merchant.setPercentage(aggregate.netProfit == 0 ? 0.0 : (aggregate.agentNet / aggregate.netProfit) * 100);
+        merchant.setIsNew(!previousMerchantIds.contains(aggregate.externalMerchantId));
+        return merchant;
     }
 
-    private static class MerchantAggregate {
-        Long externalMerchantId;
-        String name;
-        int transactions;
-        double salesAmount;
-        double income;
-        double expenses;
-        double net;
-        double bps;
-        double percentage;
-        double agentNet;
-        String processor;
+    private LineItem toLineItem(
+            Batch batch,
+            ParsedLineItem item,
+            Map<Long, Merchant> merchantsByExternalId,
+            Map<String, User> usersByName
+    ) {
+        LineItem lineItem = new LineItem();
+        lineItem.setBatch(batch);
+        lineItem.setMerchant(item.externalMerchantId == null ? null : merchantsByExternalId.get(item.externalMerchantId));
+        lineItem.setUser(resolveUser(item, usersByName));
+        lineItem.setType(item.type);
+        lineItem.setSubjectName(item.subjectName);
+        lineItem.setDescription(item.description);
+        lineItem.setAmount(legacyAmount(item));
+        lineItem.setIncome(item.income);
+        lineItem.setExpenses(item.expenses);
+        lineItem.setNet(item.net);
+        lineItem.setAgentNet(item.agentNet);
+        lineItem.setPercentage(item.percentage);
+        lineItem.setNotes(null);
+        return lineItem;
     }
 
-    private static class ParsedLineItem {
-        Long externalMerchantId;
-        String description;
-        double amount;
+    private User resolveUser(ParsedLineItem item, Map<String, User> usersByName) {
+        if (item.externalMerchantId != null) {
+            return null;
+        }
+        return usersByName.get(canonicalizeName(item.subjectName));
+    }
+
+    private static String chooseName(String currentValue, String candidate) {
+        return (currentValue == null || currentValue.isBlank()) ? candidate : currentValue;
+    }
+
+    private static double legacyAmount(ParsedLineItem item) {
+        if (item.net != 0) {
+            return item.net;
+        }
+        return item.agentNet;
+    }
+
+    private static String clean(String[] fields, int index) {
+        if (index >= fields.length) {
+            return "";
+        }
+        return fields[index].replace("\"", "").trim();
+    }
+
+    private static int parseInt(String[] fields, int index) {
+        String value = clean(fields, index);
+        return value.isEmpty() ? 0 : Integer.parseInt(value.replace(",", ""));
+    }
+
+    private static double parseDouble(String[] fields, int index) {
+        String value = clean(fields, index);
+        return value.isEmpty() ? 0.0 : Double.parseDouble(value.replace(",", ""));
+    }
+
+    private static Double parsePercentage(String[] fields, int index) {
+        String value = clean(fields, index).replace("%", "");
+        return value.isEmpty() ? null : Double.parseDouble(value);
+    }
+
+    private static boolean isNumeric(String value) {
+        return value != null && NUMERIC_PATTERN.matcher(value).matches();
+    }
+
+    private static String stripSubjectName(String subject) {
+        return TRAILING_ID_PATTERN.matcher(subject).replaceFirst("").trim();
+    }
+
+    private static String canonicalizeName(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.US);
+    }
+
+    private static String extractProcessor(String header) {
+        String value = header.replaceFirst("^Residuals -\\s*", "");
+        int idx = value.lastIndexOf('(');
+        return idx > 0 ? value.substring(0, idx).trim() : value.trim();
+    }
+
+    private static final class MerchantAggregate {
+        private Long externalMerchantId;
+        private String name;
+        private int transactions;
+        private double salesAmount;
+        private double grossProfit;
+        private double deductions;
+        private double netProfit;
+        private double agentNet;
+        private String processor;
+    }
+
+    private static final class ParsedLineItem {
+        private Long externalMerchantId;
+        private String subjectName;
+        private String description;
+        private double income;
+        private double expenses;
+        private double net;
+        private Double percentage;
+        private double agentNet;
+        private LineItemType type;
     }
 }

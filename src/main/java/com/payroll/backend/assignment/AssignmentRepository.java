@@ -9,6 +9,8 @@ public interface AssignmentRepository extends JpaRepository<Assignment, Long> {
 
     List<Assignment> findByMerchantId(Long merchantId);
 
+    List<Assignment> findByMerchantIdOrderByIdAsc(Long merchantId);
+
     List<Assignment> findByMerchantBatchId(Long batchId);
 
     List<Assignment> findByUserId(Long userId);

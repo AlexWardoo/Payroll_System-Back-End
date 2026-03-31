@@ -30,13 +30,12 @@ public class AssignmentController {
         return assignmentService.getAssignmentsForUserInBatch(userId, batchId);
     }
 
-    @PostMapping
-    public Assignment assignUserToMerchant(@RequestBody AssignmentRequest request) {
-        return assignmentService.assignUserToMerchant(
-                request.getMerchantId(),
-                request.getUserId(),
-                request.getPercentage()
-        );
+    @PutMapping("/merchant/{merchantId}")
+    public List<Assignment> replaceAssignmentsForMerchant(
+            @PathVariable Long merchantId,
+            @RequestBody MerchantAssignmentsUpdateRequest request
+    ) {
+        return assignmentService.replaceAssignmentsForMerchant(merchantId, request.getAssignments());
     }
 
     @DeleteMapping

@@ -29,4 +29,12 @@ public class Assignment {
 
     @Column(nullable = false)
     private Double percentage;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "basis_type", nullable = false, length = 20)
+    private PayoutBasis basisType = PayoutBasis.MERCHANT_NET;
+
+    @ManyToOne
+    @JoinColumn(name = "source_user_id")
+    private User sourceUser;
 }
