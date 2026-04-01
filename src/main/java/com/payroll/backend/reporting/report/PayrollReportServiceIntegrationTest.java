@@ -1,4 +1,4 @@
-package com.payroll.backend.report;
+package com.payroll.backend.reporting.report;
 
 import com.payroll.backend.assignment.Assignment;
 import com.payroll.backend.assignment.AssignmentRepository;
@@ -7,6 +7,9 @@ import com.payroll.backend.importcsv.CsvImportService;
 import com.payroll.backend.importcsv.ImportSummaryResponse;
 import com.payroll.backend.merchant.Merchant;
 import com.payroll.backend.merchant.MerchantRepository;
+import com.payroll.backend.report.AdminReportResponse;
+import com.payroll.backend.report.AgentSummaryResponse;
+import com.payroll.backend.report.EmployeeReportResponse;
 import com.payroll.backend.user.User;
 import com.payroll.backend.user.UserRepository;
 import org.junit.jupiter.api.Test;

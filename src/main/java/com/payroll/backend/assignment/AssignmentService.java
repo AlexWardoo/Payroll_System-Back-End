@@ -100,29 +100,52 @@ public class AssignmentService {
 
     private Assignment createAssignment(Merchant merchant, AssignmentRequest request) {
         User user = userRepository.findById(request.getUserId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found: " + request.getUserId()));
-
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "User not found: " + request.getUserId()
+                ));
+    
         Assignment assignment = new Assignment();
         assignment.setMerchant(merchant);
         assignment.setUser(user);
-        assignment.setPercentage(request.getPercentage());
-
-        PayoutBasis basis = request.getBasisType() == null ? PayoutBasis.MERCHANT_NET : request.getBasisType();
-        assignment.setBasisType(basis);
-
-        if (basis == PayoutBasis.AGENT_PAYOUT) {
-            if (request.getSourceUserId() == null) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Override assignments require a source user");
-            }
-            if (request.getSourceUserId().equals(request.getUserId())) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Override assignments cannot reference themselves");
-            }
-
-            User sourceUser = userRepository.findById(request.getSourceUserId())
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source user not found: " + request.getSourceUserId()));
-            assignment.setSourceUser(sourceUser);
+    
+        double percentage = request.getPercentage();
+        if (percentage > 1) {
+            percentage = percentage / 100.0;
         }
-
+        assignment.setPercentage(percentage);
+    
+        PayoutBasis basis = request.getBasisType() == null
+                ? PayoutBasis.MERCHANT_NET
+                : request.getBasisType();
+        assignment.setBasisType(basis);
+    
+        if (basis == PayoutBasis.SOURCE_USER_AGENT_PROFIT) {
+            if (request.getSourceUserId() == null) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Source-agent-profit assignments require a source user"
+                );
+            }
+    
+            if (request.getSourceUserId().equals(request.getUserId())) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Assignments cannot reference the same user as their source"
+                );
+            }
+    
+            User sourceUser = userRepository.findById(request.getSourceUserId())
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.NOT_FOUND,
+                            "Source user not found: " + request.getSourceUserId()
+                    ));
+    
+            assignment.setSourceUser(sourceUser);
+        } else {
+            assignment.setSourceUser(null);
+        }
+    
         return assignment;
     }
 }

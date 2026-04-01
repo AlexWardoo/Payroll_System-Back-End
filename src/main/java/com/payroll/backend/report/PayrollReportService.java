@@ -2,6 +2,7 @@ package com.payroll.backend.report;
 
 import com.payroll.backend.assignment.Assignment;
 import com.payroll.backend.assignment.AssignmentRepository;
+import com.payroll.backend.assignment.PayoutBasis;
 import com.payroll.backend.auth.AuthUserResponse;
 import com.payroll.backend.batch.Batch;
 import com.payroll.backend.batch.BatchRepository;
@@ -9,9 +10,6 @@ import com.payroll.backend.lineitem.LineItem;
 import com.payroll.backend.lineitem.LineItemRepository;
 import com.payroll.backend.merchant.Merchant;
 import com.payroll.backend.merchant.MerchantRepository;
-import com.payroll.backend.payout.PayoutOverride;
-import com.payroll.backend.payout.PayoutOverrideRepository;
-import com.payroll.backend.user.PayoutBasis;
 import com.payroll.backend.user.User;
 import com.payroll.backend.user.UserRepository;
 import com.payroll.backend.user.UserRole;
@@ -34,7 +32,6 @@ public class PayrollReportService {
     private final AssignmentRepository assignmentRepository;
     private final LineItemRepository lineItemRepository;
     private final UserRepository userRepository;
-    private final PayoutOverrideRepository payoutOverrideRepository;
 
     public AdminReportResponse getAdminReport(Long batchId) {
         Batch batch = getBatch(batchId);
@@ -54,7 +51,7 @@ public class PayrollReportService {
                             user.getUsername(),
                             user.getDisplayName(),
                             totals.assignedAccounts(),
-                            round(totals.ownPayout()),
+                            round(totals.directPayout()),
                             round(totals.overridePayout()),
                             round(totals.directAdjustments()),
                             round(totals.totalPayout())
@@ -83,6 +80,7 @@ public class PayrollReportService {
     public EmployeeReportResponse getEmployeeReport(Long batchId, Long userId) {
         Batch batch = getBatch(batchId);
         BatchSnapshot snapshot = buildSnapshot(batch);
+
         User user = snapshot.employees().get(userId);
         if (user == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Employee not found: " + userId);
@@ -98,7 +96,11 @@ public class PayrollReportService {
                     double totalPayout = existingSnapshot.userTotals()
                             .getOrDefault(user.getId(), UserTotals.empty())
                             .totalPayout();
-                    return new EmployeeHistoryPointResponse(existingBatch.getId(), existingBatch.getName(), round(totalPayout));
+                    return new EmployeeHistoryPointResponse(
+                            existingBatch.getId(),
+                            existingBatch.getName(),
+                            round(totalPayout)
+                    );
                 })
                 .toList();
 
@@ -124,10 +126,12 @@ public class PayrollReportService {
         AdminReportResponse report = getAdminReport(batchId);
         StringBuilder csv = new StringBuilder();
         csv.append("Merchant ID,Merchant,Processor,Sales Volume,Gross Profit,Deductions,Net Profit,Agent Net,Assignments\n");
+
         for (MerchantReportResponse merchant : report.merchants()) {
             String assignments = merchant.assignments().stream()
                     .map(item -> item.displayName() + " " + item.percentage() + "% => " + item.totalPayout())
                     .collect(Collectors.joining(" | "));
+
             csv.append(csvValue(merchant.externalMerchantId()))
                     .append(',').append(csvValue(merchant.name()))
                     .append(',').append(csvValue(merchant.processor()))
@@ -139,17 +143,20 @@ public class PayrollReportService {
                     .append(',').append(csvValue(assignments))
                     .append('\n');
         }
+
         return csv.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     public byte[] exportEmployeeCsv(Long batchId, Long userId) {
         EmployeeReportResponse report = getEmployeeReport(batchId, userId);
         StringBuilder csv = new StringBuilder();
+
         csv.append("Merchant ID,Merchant,Processor,Sales Volume,Deductions,Payout,Override Payout,Relationship");
         if (Boolean.TRUE.equals(report.employee().canViewProfit())) {
-            csv.append(",Gross Profit,Net Profit");
+            csv.append(",Gross Profit,Net Profit,Agent Net");
         }
         csv.append('\n');
+
         for (EmployeeMerchantReportResponse merchant : report.merchants()) {
             csv.append(csvValue(merchant.externalMerchantId()))
                     .append(',').append(csvValue(merchant.name()))
@@ -159,12 +166,16 @@ public class PayrollReportService {
                     .append(',').append(merchant.payout())
                     .append(',').append(merchant.overridePayout())
                     .append(',').append(csvValue(merchant.relationship()));
+
             if (Boolean.TRUE.equals(report.employee().canViewProfit())) {
                 csv.append(',').append(merchant.grossProfit() == null ? "" : merchant.grossProfit())
-                        .append(',').append(merchant.netProfit() == null ? "" : merchant.netProfit());
+                        .append(',').append(merchant.netProfit() == null ? "" : merchant.netProfit())
+                        .append(',').append(merchant.agentNet() == null ? "" : merchant.agentNet());
             }
+
             csv.append('\n');
         }
+
         return csv.toString().getBytes(StandardCharsets.UTF_8);
     }
 
@@ -172,12 +183,14 @@ public class PayrollReportService {
         List<Merchant> merchants = merchantRepository.findByBatchIdOrderByNameAsc(batch.getId());
         List<Assignment> assignments = assignmentRepository.findByMerchantBatchId(batch.getId());
         List<LineItem> lineItems = lineItemRepository.findByBatchId(batch.getId());
+
         Map<Long, List<Assignment>> assignmentsByMerchantId = assignments.stream()
                 .collect(Collectors.groupingBy(assignment -> assignment.getMerchant().getId()));
 
         Set<Long> employeeIds = assignments.stream()
                 .map(assignment -> assignment.getUser().getId())
                 .collect(Collectors.toCollection(LinkedHashSet::new));
+
         lineItems.stream()
                 .map(LineItem::getUser)
                 .filter(Objects::nonNull)
@@ -188,20 +201,20 @@ public class PayrollReportService {
         List<User> employees = allUsers.stream()
                 .filter(user -> user.getRole() == UserRole.EMPLOYEE)
                 .toList();
+
         Map<Long, User> employeeMap = employees.stream()
                 .collect(Collectors.toMap(User::getId, Function.identity()));
+
         Map<Long, User> allUsersById = allUsers.stream()
                 .collect(Collectors.toMap(User::getId, Function.identity()));
 
         Map<Long, List<LineItem>> merchantLineItems = lineItems.stream()
                 .filter(item -> item.getMerchant() != null)
                 .collect(Collectors.groupingBy(item -> item.getMerchant().getId()));
+
         Map<Long, List<LineItem>> directUserAdjustments = lineItems.stream()
                 .filter(item -> item.getMerchant() == null && item.getUser() != null)
                 .collect(Collectors.groupingBy(item -> item.getUser().getId()));
-
-        Map<Long, List<PayoutOverride>> overridesBySourceUserId = payoutOverrideRepository.findBySourceUserIdIn(employeeIds).stream()
-                .collect(Collectors.groupingBy(override -> override.getSourceUser().getId()));
 
         Map<Long, UserAccumulator> userAccumulators = new HashMap<>();
         for (User employee : employees) {
@@ -220,19 +233,22 @@ public class PayrollReportService {
 
         for (Merchant merchant : merchants) {
             List<LineItem> merchantItems = merchantLineItems.getOrDefault(merchant.getId(), List.of());
+
             double additionsTotal = merchantItems.stream()
                     .filter(item -> item.getType().name().equals("ADDITION"))
-                    .mapToDouble(LineItem::getNet)
+                    .mapToDouble(item -> safe(item.getNet()))
                     .sum();
+
             double deductionAdjustments = merchantItems.stream()
                     .filter(item -> item.getType().name().equals("DEDUCTION"))
-                    .mapToDouble(item -> Math.abs(item.getNet()))
+                    .mapToDouble(item -> Math.abs(safe(item.getNet())))
                     .sum();
+
             double effectiveSales = safe(merchant.getSalesAmount());
-            double effectiveGross = safe(merchant.getIncome()) + merchantItems.stream().mapToDouble(LineItem::getIncome).sum();
-            double effectiveDeductions = safe(merchant.getExpenses()) + merchantItems.stream().mapToDouble(LineItem::getExpenses).sum();
-            double effectiveNet = safe(merchant.getNet()) + merchantItems.stream().mapToDouble(LineItem::getNet).sum();
-            double effectiveAgentNet = safe(merchant.getAgentNet()) + merchantItems.stream().mapToDouble(LineItem::getAgentNet).sum();
+            double effectiveGross = safe(merchant.getIncome()) + merchantItems.stream().mapToDouble(item -> safe(item.getIncome())).sum();
+            double effectiveDeductions = safe(merchant.getExpenses()) + merchantItems.stream().mapToDouble(item -> safe(item.getExpenses())).sum();
+            double effectiveNet = safe(merchant.getNet()) + merchantItems.stream().mapToDouble(item -> safe(item.getNet())).sum();
+            double effectiveAgentNet = safe(merchant.getAgentNet()) + merchantItems.stream().mapToDouble(item -> safe(item.getAgentNet())).sum();
 
             totalSales += effectiveSales;
             totalGross += effectiveGross;
@@ -241,47 +257,57 @@ public class PayrollReportService {
             totalAgentNet += effectiveAgentNet;
 
             List<MerchantAssignmentResponse> assignmentResponses = new ArrayList<>();
+
             for (Assignment assignment : assignmentsByMerchantId.getOrDefault(merchant.getId(), List.of())) {
                 User user = assignment.getUser();
-                double allocation = safe(assignment.getPercentage()) / 100.0;
-                double ownBase = payoutBase(user.getPayoutBasis(), effectiveNet, effectiveAgentNet);
-                double ownPayout = ownBase * allocation * safe(user.getPayoutRate()) / 100.0;
-                double overridePayout = 0;
+                UserAccumulator accumulator = userAccumulators.computeIfAbsent(user.getId(), ignored -> new UserAccumulator());
 
-                for (PayoutOverride override : overridesBySourceUserId.getOrDefault(user.getId(), List.of())) {
-                    User beneficiary = override.getBeneficiaryUser();
-                    UserAccumulator beneficiaryAccumulator = userAccumulators.computeIfAbsent(beneficiary.getId(), ignored -> new UserAccumulator());
-                    double payout = ownBase * allocation * safe(override.getPercentage()) / 100.0;
-                    overridePayout += payout;
-                    beneficiaryAccumulator.overridePayout += payout;
-                    beneficiaryAccumulator.totalPayout += payout;
-                    beneficiaryAccumulator.salesVolume += effectiveSales;
-                    beneficiaryAccumulator.deductions += effectiveDeductions;
-                    totalRepPayout += payout;
-                    employeeMerchantMap.computeIfAbsent(beneficiary.getId(), ignored -> new ArrayList<>())
-                            .add(new EmployeeMerchantAccumulator(merchant, effectiveSales, effectiveGross, effectiveDeductions, effectiveNet, 0, payout, "Override from " + user.getDisplayName()));
+                double percentage = safe(assignment.getPercentage());
+                double payoutBase = payoutBase(assignment.getBasisType(), effectiveNet, effectiveAgentNet);
+                double payout = payoutBase * percentage;
+
+                boolean overrideAssignment = assignment.getBasisType() == PayoutBasis.SOURCE_USER_AGENT_PROFIT;
+                double directPayout = overrideAssignment ? 0.0 : payout;
+                double overridePayout = overrideAssignment ? payout : 0.0;
+
+                if (!overrideAssignment) {
+                    accumulator.assignedAccounts += 1;
+                    accumulator.directPayout += directPayout;
+                } else {
+                    accumulator.overridePayout += overridePayout;
                 }
 
-                UserAccumulator accumulator = userAccumulators.computeIfAbsent(user.getId(), ignored -> new UserAccumulator());
-                accumulator.assignedAccounts += 1;
-                accumulator.ownPayout += ownPayout;
-                accumulator.totalPayout += ownPayout;
+                accumulator.totalPayout += payout;
                 accumulator.salesVolume += effectiveSales;
                 accumulator.deductions += effectiveDeductions;
-                totalRepPayout += ownPayout;
+
+                totalRepPayout += payout;
+
+                String relationship = buildRelationship(assignment);
 
                 assignmentResponses.add(new MerchantAssignmentResponse(
                         user.getId(),
                         user.getUsername(),
                         user.getDisplayName(),
-                        round(safe(assignment.getPercentage())),
-                        round(ownPayout),
+                        round(percentage * 100.0),
+                        round(directPayout),
                         round(overridePayout),
-                        round(ownPayout + overridePayout)
+                        round(payout),
+                        round(effectiveAgentNet)
                 ));
 
                 employeeMerchantMap.computeIfAbsent(user.getId(), ignored -> new ArrayList<>())
-                        .add(new EmployeeMerchantAccumulator(merchant, effectiveSales, effectiveGross, effectiveDeductions, effectiveNet, ownPayout, 0, "Assigned"));
+                        .add(new EmployeeMerchantAccumulator(
+                                merchant,
+                                effectiveSales,
+                                effectiveGross,
+                                effectiveDeductions,
+                                effectiveNet,
+                                effectiveAgentNet,
+                                directPayout,
+                                overridePayout,
+                                relationship
+                        ));
             }
 
             merchantReports.add(new MerchantReportResponse(
@@ -305,13 +331,14 @@ public class PayrollReportService {
 
         double adminOnlyAdjustments = lineItems.stream()
                 .filter(item -> item.getMerchant() == null && item.getUser() == null)
-                .mapToDouble(LineItem::getAgentNet)
+                .mapToDouble(item -> safe(item.getAgentNet()))
                 .sum();
 
         for (Map.Entry<Long, List<LineItem>> entry : directUserAdjustments.entrySet()) {
             double directAdjustment = entry.getValue().stream()
-                    .mapToDouble(LineItem::getAgentNet)
+                    .mapToDouble(item -> safe(item.getAgentNet()))
                     .sum();
+
             User adjustedUser = allUsersById.get(entry.getKey());
             if (adjustedUser != null && adjustedUser.getRole() == UserRole.EMPLOYEE) {
                 UserAccumulator accumulator = userAccumulators.computeIfAbsent(entry.getKey(), ignored -> new UserAccumulator());
@@ -328,7 +355,7 @@ public class PayrollReportService {
             UserAccumulator value = entry.getValue();
             totalsByUser.put(entry.getKey(), new UserTotals(
                     value.assignedAccounts,
-                    value.ownPayout,
+                    value.directPayout,
                     value.overridePayout,
                     value.directAdjustments,
                     value.totalPayout,
@@ -343,6 +370,7 @@ public class PayrollReportService {
             if (user == null) {
                 continue;
             }
+
             employeeMerchants.put(entry.getKey(), entry.getValue().stream()
                     .collect(Collectors.toMap(
                             accumulator -> accumulator.merchant().getId() + ":" + accumulator.relationship(),
@@ -352,18 +380,19 @@ public class PayrollReportService {
                     .values().stream()
                     .sorted(Comparator.comparing(accumulator -> accumulator.merchant().getName(), String.CASE_INSENSITIVE_ORDER))
                     .map(accumulator -> new EmployeeMerchantReportResponse(
-                            accumulator.merchant().getId(),
-                            accumulator.merchant().getExternalMerchantId(),
-                            accumulator.merchant().getName(),
-                            accumulator.merchant().getProcessor(),
-                            round(accumulator.salesVolume()),
-                            Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.grossProfit()) : null,
-                            Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.netProfit()) : null,
-                            round(accumulator.deductions()),
-                            round(accumulator.ownPayout()),
-                            round(accumulator.overridePayout()),
-                            accumulator.relationship()
-                    ))
+                        accumulator.merchant().getId(),
+                        accumulator.merchant().getExternalMerchantId(),
+                        accumulator.merchant().getName(),
+                        accumulator.merchant().getProcessor(),
+                        round(accumulator.salesVolume()),
+                        Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.grossProfit()) : null,
+                        Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.netProfit()) : null,
+                        Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.agentNet()) : null,
+                        round(accumulator.deductions()),
+                        round(accumulator.ownPayout()),
+                        round(accumulator.overridePayout()),
+                        accumulator.relationship()
+                ))
                     .toList());
         }
 
@@ -388,7 +417,23 @@ public class PayrollReportService {
     }
 
     private static double payoutBase(PayoutBasis basis, double effectiveNet, double effectiveAgentNet) {
-        return basis == PayoutBasis.AGENT_NET ? effectiveAgentNet : effectiveNet;
+        return switch (basis) {
+            case MERCHANT_NET -> effectiveNet;
+            case AGENT_PROFIT, SOURCE_USER_AGENT_PROFIT -> effectiveAgentNet;
+        };
+    }
+
+    private static String buildRelationship(Assignment assignment) {
+        return switch (assignment.getBasisType()) {
+            case MERCHANT_NET -> "Merchant Net";
+            case AGENT_PROFIT -> "Agent Profit";
+            case SOURCE_USER_AGENT_PROFIT -> {
+                String sourceName = assignment.getSourceUser() == null
+                        ? "Unknown Source"
+                        : assignment.getSourceUser().getDisplayName();
+                yield "Override from " + sourceName;
+            }
+        };
     }
 
     private static double safe(Double value) {
@@ -421,7 +466,7 @@ public class PayrollReportService {
 
     private record UserTotals(
             long assignedAccounts,
-            double ownPayout,
+            double directPayout,
             double overridePayout,
             double directAdjustments,
             double totalPayout,
@@ -435,7 +480,7 @@ public class PayrollReportService {
 
     private static final class UserAccumulator {
         private long assignedAccounts;
-        private double ownPayout;
+        private double directPayout;
         private double overridePayout;
         private double directAdjustments;
         private double totalPayout;
@@ -449,6 +494,7 @@ public class PayrollReportService {
             double grossProfit,
             double deductions,
             double netProfit,
+            double agentNet,
             double ownPayout,
             double overridePayout,
             String relationship
@@ -460,6 +506,7 @@ public class PayrollReportService {
                     grossProfit + other.grossProfit,
                     deductions + other.deductions,
                     netProfit + other.netProfit,
+                    agentNet + other.agentNet,
                     ownPayout + other.ownPayout,
                     overridePayout + other.overridePayout,
                     relationship

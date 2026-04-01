@@ -8,6 +8,7 @@ public record EmployeeMerchantReportResponse(
         double salesVolume,
         Double grossProfit,
         Double netProfit,
+        Double agentNet,
         double deductions,
         double payout,
         double overridePayout,

@@ -7,10 +7,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 @Entity
-@Table(
-    name = "assignments",
-    uniqueConstraints = @UniqueConstraint(columnNames = {"merchant_id", "user_id"})
-)
+@Table(name = "assignments")
 @Getter
 @Setter
 public class Assignment {
@@ -27,12 +24,12 @@ public class Assignment {
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
+    @Enumerated(EnumType.STRING)
+    @Column(name = "basis_type", nullable = false, length = 30)
+    private PayoutBasis basisType;
+
     @Column(nullable = false)
     private Double percentage;
-
-    @Enumerated(EnumType.STRING)
-    @Column(name = "basis_type", nullable = false, length = 20)
-    private PayoutBasis basisType = PayoutBasis.MERCHANT_NET;
 
     @ManyToOne
     @JoinColumn(name = "source_user_id")

@@ -7,6 +7,7 @@ public record MerchantAssignmentResponse(
         double percentage,
         double payoutAmount,
         double overrideAmount,
-        double totalPayout
+        double totalPayout,
+        double agentNet
 ) {
 }

@@ -27,13 +27,6 @@ public class User {
     @Column(name = "display_name", nullable = false, length = 100)
     private String displayName;
 
-    @Enumerated(EnumType.STRING)
-    @Column(name = "payout_basis", nullable = false, length = 20)
-    private PayoutBasis payoutBasis;
-
-    @Column(name = "payout_rate", nullable = false)
-    private Double payoutRate;
-
     @Column(name = "can_view_profit", nullable = false)
     private Boolean canViewProfit;
 }
