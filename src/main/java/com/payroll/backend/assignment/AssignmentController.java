@@ -13,7 +13,7 @@ public class AssignmentController {
     private final AssignmentService assignmentService;
 
     @GetMapping("/merchant/{merchantId}")
-    public List<Assignment> getAssignmentsForMerchant(@PathVariable Long merchantId) {
+    public List<Assignment> getAssignmentsForMerchant(@PathVariable String merchantId) {
         return assignmentService.getAssignmentsForMerchant(merchantId);
     }
 
@@ -22,17 +22,17 @@ public class AssignmentController {
         return assignmentService.getAssignmentsForUser(userId);
     }
 
-    @GetMapping("/user/{userId}/batch/{batchId}")
-    public List<Assignment> getAssignmentsForUserInBatch(
+    @GetMapping("/user/{userId}/month/{monthId}")
+    public List<Assignment> getAssignmentsForUserInMonth(
             @PathVariable Long userId,
-            @PathVariable Long batchId
+            @PathVariable Long monthId
     ) {
-        return assignmentService.getAssignmentsForUserInBatch(userId, batchId);
+        return assignmentService.getAssignmentsForUserInMonth(userId, monthId);
     }
 
     @PutMapping("/merchant/{merchantId}")
     public List<Assignment> replaceAssignmentsForMerchant(
-            @PathVariable Long merchantId,
+            @PathVariable String merchantId,
             @RequestBody MerchantAssignmentsUpdateRequest request
     ) {
         return assignmentService.replaceAssignmentsForMerchant(merchantId, request.getAssignments());
@@ -40,9 +40,16 @@ public class AssignmentController {
 
     @DeleteMapping
     public void unassignUserFromMerchant(
-            @RequestParam Long merchantId,
-            @RequestParam Long userId
+            @RequestParam String merchantId,
+            @RequestParam Long userId,
+            @RequestParam(required = false) PayoutBasis basisType,
+            @RequestParam(required = false) Long sourceUserId
     ) {
+        if (basisType != null) {
+            assignmentService.unassignSpecificRuleFromMerchant(merchantId, userId, basisType, sourceUserId);
+            return;
+        }
+
         assignmentService.unassignUserFromMerchant(merchantId, userId);
     }
 }

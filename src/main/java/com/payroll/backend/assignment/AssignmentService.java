@@ -14,6 +14,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import java.math.BigDecimal;
+import java.util.Objects;
+
 @Service
 @RequiredArgsConstructor
 public class AssignmentService {
@@ -22,30 +25,31 @@ public class AssignmentService {
     private final MerchantRepository merchantRepository;
     private final UserRepository userRepository;
 
-    public List<Assignment> getAssignmentsForMerchant(Long merchantId) {
-        return assignmentRepository.findByMerchantId(merchantId);
+    public List<Assignment> getAssignmentsForMerchant(String merchantId) {
+        return assignmentRepository.findByMerchantMerchantIdAndActiveTrue(merchantId);
     }
 
     public List<Assignment> getAssignmentsForUser(Long userId) {
-        return assignmentRepository.findByUserId(userId);
+        return assignmentRepository.findByUserIdAndActiveTrue(userId);
     }
 
-    public List<Assignment> getAssignmentsForUserInBatch(Long userId, Long batchId) {
-        return assignmentRepository.findByUserIdAndMerchantBatchId(userId, batchId);
+    public List<Assignment> getAssignmentsForUserInMonth(Long userId, Long monthId) {
+        return assignmentRepository.findByUserIdAndMonthId(userId, monthId);
     }
 
-    public Assignment assignUserToMerchant(Long merchantId, Long userId, Double percentage) {
+    public Assignment assignUserToMerchant(String merchantId, Long userId, BigDecimal percentage) {
         Merchant merchant = merchantRepository.findById(merchantId)
                 .orElseThrow(() -> new RuntimeException("Merchant not found: " + merchantId));
 
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new RuntimeException("User not found: " + userId));
 
-        return assignmentRepository.findByMerchantIdAndUserId(merchantId, userId)
+        return assignmentRepository.findByMerchantMerchantIdAndUserIdAndActiveTrue(merchantId, userId)
                 .map(existing -> {
                     existing.setPercentage(percentage);
                     existing.setBasisType(PayoutBasis.MERCHANT_NET);
                     existing.setSourceUser(null);
+                    existing.setActive(true);
                     return assignmentRepository.save(existing);
                 })
                 .orElseGet(() -> {
@@ -54,32 +58,42 @@ public class AssignmentService {
                     assignment.setUser(user);
                     assignment.setPercentage(percentage);
                     assignment.setBasisType(PayoutBasis.MERCHANT_NET);
+                    assignment.setActive(true);
                     return assignmentRepository.save(assignment);
                 });
     }
 
     @Transactional
-    public List<Assignment> replaceAssignmentsForMerchant(Long merchantId, List<AssignmentRequest> requests) {
+    public List<Assignment> replaceAssignmentsForMerchant(String merchantId, List<AssignmentRequest> requests) {
         Merchant merchant = merchantRepository.findById(merchantId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Merchant not found: " + merchantId));
 
-        List<Assignment> existingAssignments = assignmentRepository.findByMerchantIdOrderByIdAsc(merchantId);
+        List<Assignment> existingAssignments = assignmentRepository.findByMerchantMerchantIdAndActiveTrueOrderByIdAsc(merchantId);
         assignmentRepository.deleteAll(existingAssignments);
 
         if (requests == null || requests.isEmpty()) {
             return List.of();
         }
 
-        Set<Long> seenUsers = new HashSet<>();
+        Set<String> seenRules = new HashSet<>();
         for (AssignmentRequest request : requests) {
             if (request.getUserId() == null || request.getPercentage() == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Assignments require a user and percentage");
             }
-            if (!seenUsers.add(request.getUserId())) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Duplicate users are not allowed on a merchant");
-            }
-            if (request.getPercentage() < 0) {
+            if (request.getPercentage().doubleValue() < 0) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Percentages cannot be negative");
+            }
+            if (request.getPercentage().doubleValue() > 100) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Percentages cannot exceed 100");
+            }
+
+            PayoutBasis basis = request.getBasisType() == null
+                    ? PayoutBasis.MERCHANT_NET
+                    : request.getBasisType();
+
+            String ruleKey = request.getUserId() + ":" + basis + ":" + Objects.toString(request.getSourceUserId(), "");
+            if (!seenRules.add(ruleKey)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Duplicate active assignment rules are not allowed");
             }
         }
 
@@ -89,10 +103,37 @@ public class AssignmentService {
                 .toList();
     }
 
-    public void unassignUserFromMerchant(Long merchantId, Long userId) {
-        Assignment assignment = assignmentRepository.findByMerchantIdAndUserId(merchantId, userId)
-                .orElseThrow(() -> new RuntimeException(
-                        "Assignment not found for merchant " + merchantId + " and user " + userId
+    public void unassignUserFromMerchant(String merchantId, Long userId) {
+        List<Assignment> assignments = assignmentRepository.findByMerchantMerchantIdAndUserIdAndActiveTrueOrderByIdAsc(merchantId, userId);
+        if (assignments.isEmpty()) {
+            throw new RuntimeException("Assignment not found for merchant " + merchantId + " and user " + userId);
+        }
+        if (assignments.size() > 1) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Multiple assignments exist for this merchant and user. Delete a specific rule instead."
+            );
+        }
+
+        assignmentRepository.delete(assignments.getFirst());
+    }
+
+    public void unassignSpecificRuleFromMerchant(
+            String merchantId,
+            Long userId,
+            PayoutBasis basisType,
+            Long sourceUserId
+    ) {
+        Assignment assignment = assignmentRepository
+                .findByMerchantMerchantIdAndUserIdAndBasisTypeAndSourceUserIdAndActiveTrue(
+                        merchantId,
+                        userId,
+                        basisType,
+                        sourceUserId
+                )
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.NOT_FOUND,
+                        "Assignment rule not found for merchant " + merchantId + " and user " + userId
                 ));
 
         assignmentRepository.delete(assignment);
@@ -109,22 +150,20 @@ public class AssignmentService {
         assignment.setMerchant(merchant);
         assignment.setUser(user);
     
-        double percentage = request.getPercentage();
-        if (percentage > 1) {
-            percentage = percentage / 100.0;
-        }
+        BigDecimal percentage = request.getPercentage();
         assignment.setPercentage(percentage);
+        assignment.setActive(true);
     
         PayoutBasis basis = request.getBasisType() == null
                 ? PayoutBasis.MERCHANT_NET
                 : request.getBasisType();
         assignment.setBasisType(basis);
     
-        if (basis == PayoutBasis.SOURCE_USER_AGENT_PROFIT) {
+        if (basis == PayoutBasis.AGENT_NET_OVERRIDE) {
             if (request.getSourceUserId() == null) {
                 throw new ResponseStatusException(
                         HttpStatus.BAD_REQUEST,
-                        "Source-agent-profit assignments require a source user"
+                        "Agent-net-override assignments require a source user"
                 );
             }
     

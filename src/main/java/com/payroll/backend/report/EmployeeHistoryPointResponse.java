@@ -1,8 +1,8 @@
 package com.payroll.backend.report;
 
 public record EmployeeHistoryPointResponse(
-        Long batchId,
-        String batchName,
+        Long monthId,
+        String monthLabel,
         double totalPayout
 ) {
 }

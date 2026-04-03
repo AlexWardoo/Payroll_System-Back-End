@@ -6,8 +6,8 @@ import lombok.Getter;
 @Getter
 @AllArgsConstructor
 public class ImportSummaryResponse {
-    private Long batchId;
-    private String batchName;
+    private Long monthId;
+    private String monthLabel;
     private int merchantsImported;
     private int newMerchants;
     private int additionsImported;

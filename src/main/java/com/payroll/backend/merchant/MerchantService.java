@@ -1,5 +1,7 @@
 package com.payroll.backend.merchant;
 
+import com.payroll.backend.merchantreport.MerchantReport;
+import com.payroll.backend.merchantreport.MerchantReportRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -10,13 +12,17 @@ import java.util.List;
 public class MerchantService {
 
     private final MerchantRepository merchantRepository;
+    private final MerchantReportRepository merchantReportRepository;
 
-    public List<Merchant> getMerchantsForBatch(Long batchId) {
-        return merchantRepository.findByBatchIdOrderByNameAsc(batchId);
+    public List<Merchant> getMerchantsForMonth(Long monthId) {
+        return merchantReportRepository.findByMonthIdOrderByMerchantNameSnapshotAsc(monthId).stream()
+                .map(MerchantReport::getMerchant)
+                .distinct()
+                .toList();
     }
 
-    public Merchant getMerchant(Long id) {
-        return merchantRepository.findById(id)
+    public Merchant getMerchant(String merchantId) {
+        return merchantRepository.findById(merchantId)
                 .orElseThrow(() -> new RuntimeException("Merchant not found"));
     }
 

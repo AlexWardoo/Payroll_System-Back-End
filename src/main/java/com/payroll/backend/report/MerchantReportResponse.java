@@ -3,8 +3,7 @@ package com.payroll.backend.report;
 import java.util.List;
 
 public record MerchantReportResponse(
-        Long merchantId,
-        Long externalMerchantId,
+        String merchantId,
         String name,
         String processor,
         boolean isNew,

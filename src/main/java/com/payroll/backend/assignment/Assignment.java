@@ -5,6 +5,8 @@ import com.payroll.backend.user.User;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 
 @Entity
 @Table(name = "assignments")
@@ -29,9 +31,30 @@ public class Assignment {
     private PayoutBasis basisType;
 
     @Column(nullable = false)
-    private Double percentage;
+    private BigDecimal percentage;
 
     @ManyToOne
     @JoinColumn(name = "source_user_id")
     private User sourceUser;
+
+    @Column(nullable = false)
+    private Boolean active = true;
+
+    @Column(name = "created_at", nullable = false, updatable = false)
+    private OffsetDateTime createdAt;
+
+    @Column(name = "updated_at", nullable = false)
+    private OffsetDateTime updatedAt;
+
+    @PrePersist
+    protected void onCreate() {
+        OffsetDateTime now = OffsetDateTime.now();
+        this.createdAt = now;
+        this.updatedAt = now;
+    }
+
+    @PreUpdate
+    protected void onUpdate() {
+        this.updatedAt = OffsetDateTime.now();
+    }
 }

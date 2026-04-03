@@ -14,11 +14,12 @@ public class ImportController {
 
     private final CsvImportService csvImportService;
 
-    @PostMapping(value = "/batch", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ImportSummaryResponse importBatch(
+    @PostMapping(value = "/month", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ImportSummaryResponse importMonth(
             @RequestParam("file") MultipartFile file,
-            @RequestParam("batchName") String batchName
+            @RequestParam(value = "monthId", required = false) Long monthId,
+            @RequestParam(value = "newMonthLabel", required = false) String newMonthLabel
     ) throws IOException {
-        return csvImportService.importCsv(file, batchName);
+        return csvImportService.importCsv(file, monthId, newMonthLabel);
     }
 }

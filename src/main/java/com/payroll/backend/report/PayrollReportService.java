@@ -4,12 +4,11 @@ import com.payroll.backend.assignment.Assignment;
 import com.payroll.backend.assignment.AssignmentRepository;
 import com.payroll.backend.assignment.PayoutBasis;
 import com.payroll.backend.auth.AuthUserResponse;
-import com.payroll.backend.batch.Batch;
-import com.payroll.backend.batch.BatchRepository;
-import com.payroll.backend.lineitem.LineItem;
-import com.payroll.backend.lineitem.LineItemRepository;
+import com.payroll.backend.month.PayrollMonth;
+import com.payroll.backend.month.PayrollMonthRepository;
 import com.payroll.backend.merchant.Merchant;
-import com.payroll.backend.merchant.MerchantRepository;
+import com.payroll.backend.merchantreport.MerchantReport;
+import com.payroll.backend.merchantreport.MerchantReportRepository;
 import com.payroll.backend.user.User;
 import com.payroll.backend.user.UserRepository;
 import com.payroll.backend.user.UserRole;
@@ -19,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -27,15 +27,14 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class PayrollReportService {
 
-    private final BatchRepository batchRepository;
-    private final MerchantRepository merchantRepository;
+    private final PayrollMonthRepository payrollMonthRepository;
+    private final MerchantReportRepository merchantReportRepository;
     private final AssignmentRepository assignmentRepository;
-    private final LineItemRepository lineItemRepository;
     private final UserRepository userRepository;
 
-    public AdminReportResponse getAdminReport(Long batchId) {
-        Batch batch = getBatch(batchId);
-        BatchSnapshot snapshot = buildSnapshot(batch);
+    public AdminReportResponse getAdminReport(Long monthId) {
+        PayrollMonth payrollMonth = getMonth(monthId);
+        MonthSnapshot snapshot = buildSnapshot(payrollMonth);
 
         List<AuthUserResponse> employees = snapshot.employees().values().stream()
                 .sorted(Comparator.comparing(User::getDisplayName, String.CASE_INSENSITIVE_ORDER))
@@ -74,12 +73,12 @@ public class PayrollReportService {
                 round(snapshot.adminOnlyAdjustments())
         );
 
-        return new AdminReportResponse(BatchSummaryResponse.from(batch), totals, employees, agentSummaries, merchants);
+        return new AdminReportResponse(PayrollMonthSummaryResponse.from(payrollMonth), totals, employees, agentSummaries, merchants);
     }
 
-    public EmployeeReportResponse getEmployeeReport(Long batchId, Long userId) {
-        Batch batch = getBatch(batchId);
-        BatchSnapshot snapshot = buildSnapshot(batch);
+    public EmployeeReportResponse getEmployeeReport(Long monthId, Long userId) {
+        PayrollMonth payrollMonth = getMonth(monthId);
+        MonthSnapshot snapshot = buildSnapshot(payrollMonth);
 
         User user = snapshot.employees().get(userId);
         if (user == null) {
@@ -89,16 +88,16 @@ public class PayrollReportService {
         UserTotals totals = snapshot.userTotals().getOrDefault(user.getId(), UserTotals.empty());
         List<EmployeeMerchantReportResponse> merchants = snapshot.employeeMerchants().getOrDefault(user.getId(), List.of());
 
-        List<EmployeeHistoryPointResponse> history = batchRepository.findAll().stream()
-                .sorted(Comparator.comparing(Batch::getCreatedAt))
-                .map(existingBatch -> {
-                    BatchSnapshot existingSnapshot = buildSnapshot(existingBatch);
+        List<EmployeeHistoryPointResponse> history = payrollMonthRepository.findAll().stream()
+                .sorted(Comparator.comparing(PayrollMonth::getCreatedAt))
+                .map(existingMonth -> {
+                    MonthSnapshot existingSnapshot = buildSnapshot(existingMonth);
                     double totalPayout = existingSnapshot.userTotals()
                             .getOrDefault(user.getId(), UserTotals.empty())
                             .totalPayout();
                     return new EmployeeHistoryPointResponse(
-                            existingBatch.getId(),
-                            existingBatch.getName(),
+                            existingMonth.getId(),
+                            existingMonth.getLabel(),
                             round(totalPayout)
                     );
                 })
@@ -114,7 +113,7 @@ public class PayrollReportService {
         );
 
         return new EmployeeReportResponse(
-                BatchSummaryResponse.from(batch),
+                PayrollMonthSummaryResponse.from(payrollMonth),
                 AuthUserResponse.from(user),
                 summary,
                 merchants,
@@ -122,8 +121,8 @@ public class PayrollReportService {
         );
     }
 
-    public byte[] exportAdminCsv(Long batchId) {
-        AdminReportResponse report = getAdminReport(batchId);
+    public byte[] exportAdminCsv(Long monthId) {
+        AdminReportResponse report = getAdminReport(monthId);
         StringBuilder csv = new StringBuilder();
         csv.append("Merchant ID,Merchant,Processor,Sales Volume,Gross Profit,Deductions,Net Profit,Agent Net,Assignments\n");
 
@@ -132,7 +131,7 @@ public class PayrollReportService {
                     .map(item -> item.displayName() + " " + item.percentage() + "% => " + item.totalPayout())
                     .collect(Collectors.joining(" | "));
 
-            csv.append(csvValue(merchant.externalMerchantId()))
+            csv.append(csvValue(merchant.merchantId()))
                     .append(',').append(csvValue(merchant.name()))
                     .append(',').append(csvValue(merchant.processor()))
                     .append(',').append(merchant.salesVolume())
@@ -147,8 +146,8 @@ public class PayrollReportService {
         return csv.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    public byte[] exportEmployeeCsv(Long batchId, Long userId) {
-        EmployeeReportResponse report = getEmployeeReport(batchId, userId);
+    public byte[] exportEmployeeCsv(Long monthId, Long userId) {
+        EmployeeReportResponse report = getEmployeeReport(monthId, userId);
         StringBuilder csv = new StringBuilder();
 
         csv.append("Merchant ID,Merchant,Processor,Sales Volume,Deductions,Payout,Override Payout,Relationship");
@@ -158,7 +157,7 @@ public class PayrollReportService {
         csv.append('\n');
 
         for (EmployeeMerchantReportResponse merchant : report.merchants()) {
-            csv.append(csvValue(merchant.externalMerchantId()))
+            csv.append(csvValue(merchant.merchantId()))
                     .append(',').append(csvValue(merchant.name()))
                     .append(',').append(csvValue(merchant.processor()))
                     .append(',').append(merchant.salesVolume())
@@ -179,23 +178,15 @@ public class PayrollReportService {
         return csv.toString().getBytes(StandardCharsets.UTF_8);
     }
 
-    private BatchSnapshot buildSnapshot(Batch batch) {
-        List<Merchant> merchants = merchantRepository.findByBatchIdOrderByNameAsc(batch.getId());
-        List<Assignment> assignments = assignmentRepository.findByMerchantBatchId(batch.getId());
-        List<LineItem> lineItems = lineItemRepository.findByBatchId(batch.getId());
+    private MonthSnapshot buildSnapshot(PayrollMonth payrollMonth) {
+        List<MerchantReport> merchantReportsForMonth = merchantReportRepository.findByMonthIdOrderByMerchantNameSnapshotAsc(payrollMonth.getId());
+        List<Assignment> assignments = assignmentRepository.findActiveByMonthId(payrollMonth.getId());
 
-        Map<Long, List<Assignment>> assignmentsByMerchantId = assignments.stream()
-                .collect(Collectors.groupingBy(assignment -> assignment.getMerchant().getId()));
+        Map<String, MerchantReport> reportByMerchantId = merchantReportsForMonth.stream()
+                .collect(Collectors.toMap(report -> report.getMerchant().getMerchantId(), Function.identity()));
 
-        Set<Long> employeeIds = assignments.stream()
-                .map(assignment -> assignment.getUser().getId())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
-
-        lineItems.stream()
-                .map(LineItem::getUser)
-                .filter(Objects::nonNull)
-                .map(User::getId)
-                .forEach(employeeIds::add);
+        Map<String, List<Assignment>> assignmentsByMerchantId = assignments.stream()
+                .collect(Collectors.groupingBy(assignment -> assignment.getMerchant().getMerchantId()));
 
         List<User> allUsers = userRepository.findAll();
         List<User> employees = allUsers.stream()
@@ -204,17 +195,6 @@ public class PayrollReportService {
 
         Map<Long, User> employeeMap = employees.stream()
                 .collect(Collectors.toMap(User::getId, Function.identity()));
-
-        Map<Long, User> allUsersById = allUsers.stream()
-                .collect(Collectors.toMap(User::getId, Function.identity()));
-
-        Map<Long, List<LineItem>> merchantLineItems = lineItems.stream()
-                .filter(item -> item.getMerchant() != null)
-                .collect(Collectors.groupingBy(item -> item.getMerchant().getId()));
-
-        Map<Long, List<LineItem>> directUserAdjustments = lineItems.stream()
-                .filter(item -> item.getMerchant() == null && item.getUser() != null)
-                .collect(Collectors.groupingBy(item -> item.getUser().getId()));
 
         Map<Long, UserAccumulator> userAccumulators = new HashMap<>();
         for (User employee : employees) {
@@ -231,24 +211,17 @@ public class PayrollReportService {
         double totalAgentNet = 0;
         double totalRepPayout = 0;
 
-        for (Merchant merchant : merchants) {
-            List<LineItem> merchantItems = merchantLineItems.getOrDefault(merchant.getId(), List.of());
+        for (MerchantReport merchantReport : merchantReportsForMonth) {
+            Merchant merchant = merchantReport.getMerchant();
 
-            double additionsTotal = merchantItems.stream()
-                    .filter(item -> item.getType().name().equals("ADDITION"))
-                    .mapToDouble(item -> safe(item.getNet()))
-                    .sum();
+            double additionsTotal = safe(merchantReport.getTotalAdditions());
+            double deductionAdjustments = 0;
 
-            double deductionAdjustments = merchantItems.stream()
-                    .filter(item -> item.getType().name().equals("DEDUCTION"))
-                    .mapToDouble(item -> Math.abs(safe(item.getNet())))
-                    .sum();
-
-            double effectiveSales = safe(merchant.getSalesAmount());
-            double effectiveGross = safe(merchant.getIncome()) + merchantItems.stream().mapToDouble(item -> safe(item.getIncome())).sum();
-            double effectiveDeductions = safe(merchant.getExpenses()) + merchantItems.stream().mapToDouble(item -> safe(item.getExpenses())).sum();
-            double effectiveNet = safe(merchant.getNet()) + merchantItems.stream().mapToDouble(item -> safe(item.getNet())).sum();
-            double effectiveAgentNet = safe(merchant.getAgentNet()) + merchantItems.stream().mapToDouble(item -> safe(item.getAgentNet())).sum();
+            double effectiveSales = safe(merchantReport.getSalesVolume());
+            double effectiveGross = safe(merchantReport.getGrossProfit());
+            double effectiveDeductions = safe(merchantReport.getTotalDeductions());
+            double effectiveNet = safe(merchantReport.getNetProfit());
+            double effectiveAgentNet = safe(merchantReport.getAgentNet());
 
             totalSales += effectiveSales;
             totalGross += effectiveGross;
@@ -258,28 +231,30 @@ public class PayrollReportService {
 
             List<MerchantAssignmentResponse> assignmentResponses = new ArrayList<>();
 
-            for (Assignment assignment : assignmentsByMerchantId.getOrDefault(merchant.getId(), List.of())) {
+            for (Assignment assignment : assignmentsByMerchantId.getOrDefault(merchant.getMerchantId(), List.of())) {
                 User user = assignment.getUser();
                 UserAccumulator accumulator = userAccumulators.computeIfAbsent(user.getId(), ignored -> new UserAccumulator());
 
                 double percentage = safe(assignment.getPercentage());
                 double payoutBase = payoutBase(assignment.getBasisType(), effectiveNet, effectiveAgentNet);
-                double payout = payoutBase * percentage;
+                double payout = payoutBase * (percentage / 100.0);
 
-                boolean overrideAssignment = assignment.getBasisType() == PayoutBasis.SOURCE_USER_AGENT_PROFIT;
+                boolean overrideAssignment = assignment.getBasisType() == PayoutBasis.AGENT_NET_OVERRIDE;
                 double directPayout = overrideAssignment ? 0.0 : payout;
                 double overridePayout = overrideAssignment ? payout : 0.0;
 
                 if (!overrideAssignment) {
-                    accumulator.assignedAccounts += 1;
                     accumulator.directPayout += directPayout;
+                    accumulator.addDirectMerchantMetrics(
+                            merchant.getMerchantId(),
+                            effectiveSales,
+                            effectiveDeductions
+                    );
                 } else {
                     accumulator.overridePayout += overridePayout;
                 }
 
                 accumulator.totalPayout += payout;
-                accumulator.salesVolume += effectiveSales;
-                accumulator.deductions += effectiveDeductions;
 
                 totalRepPayout += payout;
 
@@ -289,7 +264,7 @@ public class PayrollReportService {
                         user.getId(),
                         user.getUsername(),
                         user.getDisplayName(),
-                        round(percentage * 100.0),
+                        round(percentage),
                         round(directPayout),
                         round(overridePayout),
                         round(payout),
@@ -311,11 +286,10 @@ public class PayrollReportService {
             }
 
             merchantReports.add(new MerchantReportResponse(
-                    merchant.getId(),
-                    merchant.getExternalMerchantId(),
-                    merchant.getName(),
-                    merchant.getProcessor(),
-                    Boolean.TRUE.equals(merchant.getIsNew()),
+                    merchant.getMerchantId(),
+                    firstNonBlank(merchantReport.getMerchantNameSnapshot(), merchant.getName()),
+                    firstNonBlank(merchantReport.getProcessorSnapshot(), merchant.getProcessor()),
+                    Boolean.TRUE.equals(merchantReport.getIsNew()),
                     round(effectiveSales),
                     round(effectiveGross),
                     round(effectiveDeductions),
@@ -328,27 +302,7 @@ public class PayrollReportService {
                             .toList()
             ));
         }
-
-        double adminOnlyAdjustments = lineItems.stream()
-                .filter(item -> item.getMerchant() == null && item.getUser() == null)
-                .mapToDouble(item -> safe(item.getAgentNet()))
-                .sum();
-
-        for (Map.Entry<Long, List<LineItem>> entry : directUserAdjustments.entrySet()) {
-            double directAdjustment = entry.getValue().stream()
-                    .mapToDouble(item -> safe(item.getAgentNet()))
-                    .sum();
-
-            User adjustedUser = allUsersById.get(entry.getKey());
-            if (adjustedUser != null && adjustedUser.getRole() == UserRole.EMPLOYEE) {
-                UserAccumulator accumulator = userAccumulators.computeIfAbsent(entry.getKey(), ignored -> new UserAccumulator());
-                accumulator.directAdjustments += directAdjustment;
-                accumulator.totalPayout += directAdjustment;
-                totalRepPayout += directAdjustment;
-            } else {
-                adminOnlyAdjustments += directAdjustment;
-            }
-        }
+        double adminOnlyAdjustments = 0;
 
         Map<Long, UserTotals> totalsByUser = new HashMap<>();
         for (Map.Entry<Long, UserAccumulator> entry : userAccumulators.entrySet()) {
@@ -373,17 +327,22 @@ public class PayrollReportService {
 
             employeeMerchants.put(entry.getKey(), entry.getValue().stream()
                     .collect(Collectors.toMap(
-                            accumulator -> accumulator.merchant().getId() + ":" + accumulator.relationship(),
+                            accumulator -> accumulator.merchant().getMerchantId() + ":" + accumulator.relationship(),
                             Function.identity(),
                             EmployeeMerchantAccumulator::merge
                     ))
                     .values().stream()
                     .sorted(Comparator.comparing(accumulator -> accumulator.merchant().getName(), String.CASE_INSENSITIVE_ORDER))
                     .map(accumulator -> new EmployeeMerchantReportResponse(
-                        accumulator.merchant().getId(),
-                        accumulator.merchant().getExternalMerchantId(),
-                        accumulator.merchant().getName(),
-                        accumulator.merchant().getProcessor(),
+                        accumulator.merchant().getMerchantId(),
+                        firstNonBlank(
+                                reportByMerchantId.get(accumulator.merchant().getMerchantId()).getMerchantNameSnapshot(),
+                                accumulator.merchant().getName()
+                        ),
+                        firstNonBlank(
+                                reportByMerchantId.get(accumulator.merchant().getMerchantId()).getProcessorSnapshot(),
+                                accumulator.merchant().getProcessor()
+                        ),
                         round(accumulator.salesVolume()),
                         Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.grossProfit()) : null,
                         Boolean.TRUE.equals(user.getCanViewProfit()) ? round(accumulator.netProfit()) : null,
@@ -396,7 +355,7 @@ public class PayrollReportService {
                     .toList());
         }
 
-        return new BatchSnapshot(
+        return new MonthSnapshot(
                 employeeMap,
                 totalsByUser,
                 merchantReports,
@@ -411,23 +370,23 @@ public class PayrollReportService {
         );
     }
 
-    private Batch getBatch(Long batchId) {
-        return batchRepository.findById(batchId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Batch not found: " + batchId));
+    private PayrollMonth getMonth(Long monthId) {
+        return payrollMonthRepository.findById(monthId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Payroll month not found: " + monthId));
     }
 
     private static double payoutBase(PayoutBasis basis, double effectiveNet, double effectiveAgentNet) {
         return switch (basis) {
             case MERCHANT_NET -> effectiveNet;
-            case AGENT_PROFIT, SOURCE_USER_AGENT_PROFIT -> effectiveAgentNet;
+            case AGENT_NET, AGENT_NET_OVERRIDE -> effectiveAgentNet;
         };
     }
 
     private static String buildRelationship(Assignment assignment) {
         return switch (assignment.getBasisType()) {
             case MERCHANT_NET -> "Merchant Net";
-            case AGENT_PROFIT -> "Agent Profit";
-            case SOURCE_USER_AGENT_PROFIT -> {
+            case AGENT_NET -> "Agent Net";
+            case AGENT_NET_OVERRIDE -> {
                 String sourceName = assignment.getSourceUser() == null
                         ? "Unknown Source"
                         : assignment.getSourceUser().getDisplayName();
@@ -436,12 +395,19 @@ public class PayrollReportService {
         };
     }
 
-    private static double safe(Double value) {
-        return value == null ? 0.0 : value;
+    private static double safe(BigDecimal value) {
+        return value == null ? 0.0 : value.doubleValue();
     }
 
     private static double round(double value) {
         return Math.round(value * 100.0) / 100.0;
+    }
+
+    private static String firstNonBlank(String primary, String fallback) {
+        if (primary != null && !primary.isBlank()) {
+            return primary;
+        }
+        return fallback;
     }
 
     private static String csvValue(Object value) {
@@ -449,7 +415,7 @@ public class PayrollReportService {
         return "\"" + text.replace("\"", "\"\"") + "\"";
     }
 
-    private record BatchSnapshot(
+    private record MonthSnapshot(
             Map<Long, User> employees,
             Map<Long, UserTotals> userTotals,
             List<MerchantReportResponse> merchantReports,
@@ -486,6 +452,15 @@ public class PayrollReportService {
         private double totalPayout;
         private double salesVolume;
         private double deductions;
+        private final Set<String> directMerchantIds = new HashSet<>();
+
+        private void addDirectMerchantMetrics(String merchantId, double salesVolume, double deductions) {
+            if (directMerchantIds.add(merchantId)) {
+                assignedAccounts += 1;
+                this.salesVolume += salesVolume;
+                this.deductions += deductions;
+            }
+        }
     }
 
     private record EmployeeMerchantAccumulator(

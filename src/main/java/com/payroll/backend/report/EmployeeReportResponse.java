@@ -5,7 +5,7 @@ import com.payroll.backend.auth.AuthUserResponse;
 import java.util.List;
 
 public record EmployeeReportResponse(
-        BatchSummaryResponse batch,
+        PayrollMonthSummaryResponse month,
         AuthUserResponse employee,
         EmployeeSummaryResponse summary,
         List<EmployeeMerchantReportResponse> merchants,

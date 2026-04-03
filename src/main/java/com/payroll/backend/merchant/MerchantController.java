@@ -13,12 +13,12 @@ public class MerchantController {
     private final MerchantService merchantService;
 
     @GetMapping
-    public List<Merchant> getMerchants(@RequestParam Long batchId) {
-        return merchantService.getMerchantsForBatch(batchId);
+    public List<Merchant> getMerchants(@RequestParam Long monthId) {
+        return merchantService.getMerchantsForMonth(monthId);
     }
 
     @GetMapping("/{id}")
-    public Merchant getMerchant(@PathVariable Long id) {
+    public Merchant getMerchant(@PathVariable String id) {
         return merchantService.getMerchant(id);
     }
 

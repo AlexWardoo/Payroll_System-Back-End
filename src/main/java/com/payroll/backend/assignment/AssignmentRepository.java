@@ -1,23 +1,50 @@
 package com.payroll.backend.assignment;
 
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
 
 import java.util.List;
 import java.util.Optional;
 
 public interface AssignmentRepository extends JpaRepository<Assignment, Long> {
 
-    List<Assignment> findByMerchantId(Long merchantId);
+    List<Assignment> findByMerchantMerchantIdAndActiveTrue(String merchantId);
 
-    List<Assignment> findByMerchantIdOrderByIdAsc(Long merchantId);
+    List<Assignment> findByMerchantMerchantIdAndActiveTrueOrderByIdAsc(String merchantId);
 
-    List<Assignment> findByMerchantBatchId(Long batchId);
+    @Query("""
+            select a
+            from Assignment a
+            join MerchantReport mr on mr.merchant = a.merchant
+            where mr.month.id = :monthId and a.active = true
+            """)
+    List<Assignment> findActiveByMonthId(Long monthId);
 
-    List<Assignment> findByUserId(Long userId);
+    List<Assignment> findByUserIdAndActiveTrue(Long userId);
 
-    List<Assignment> findByUserIdAndMerchantBatchId(Long userId, Long batchId);
+    @Query("""
+            select a
+            from Assignment a
+            join MerchantReport mr on mr.merchant = a.merchant
+            where a.user.id = :userId and mr.month.id = :monthId and a.active = true
+            """)
+    List<Assignment> findByUserIdAndMonthId(Long userId, Long monthId);
 
-    Optional<Assignment> findByMerchantIdAndUserId(Long merchantId, Long userId);
+    Optional<Assignment> findByMerchantMerchantIdAndUserIdAndActiveTrue(String merchantId, Long userId);
 
-    boolean existsByMerchantIdAndUserId(Long merchantId, Long userId);
+    List<Assignment> findByMerchantMerchantIdAndUserIdAndActiveTrueOrderByIdAsc(String merchantId, Long userId);
+
+    Optional<Assignment> findByMerchantMerchantIdAndUserIdAndBasisTypeAndSourceUserIdAndActiveTrue(
+            String merchantId,
+            Long userId,
+            PayoutBasis basisType,
+            Long sourceUserId
+    );
+
+    boolean existsByMerchantMerchantIdAndUserIdAndBasisTypeAndSourceUserIdAndActiveTrue(
+            String merchantId,
+            Long userId,
+            PayoutBasis basisType,
+            Long sourceUserId
+    );
 }

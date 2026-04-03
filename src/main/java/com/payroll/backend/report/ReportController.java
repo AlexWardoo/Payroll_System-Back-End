@@ -15,24 +15,24 @@ public class ReportController {
     private final PayrollReportService payrollReportService;
 
     @GetMapping("/admin")
-    public AdminReportResponse getAdminReport(@RequestParam Long batchId) {
-        return payrollReportService.getAdminReport(batchId);
+    public AdminReportResponse getAdminReport(@RequestParam Long monthId) {
+        return payrollReportService.getAdminReport(monthId);
     }
 
     @GetMapping("/employee/{userId}")
-    public EmployeeReportResponse getEmployeeReport(@PathVariable Long userId, @RequestParam Long batchId) {
-        return payrollReportService.getEmployeeReport(batchId, userId);
+    public EmployeeReportResponse getEmployeeReport(@PathVariable Long userId, @RequestParam Long monthId) {
+        return payrollReportService.getEmployeeReport(monthId, userId);
     }
 
     @GetMapping("/admin/export")
-    public ResponseEntity<byte[]> exportAdminReport(@RequestParam Long batchId) {
-        return csvResponse("admin-report-" + batchId + ".csv", payrollReportService.exportAdminCsv(batchId));
+    public ResponseEntity<byte[]> exportAdminReport(@RequestParam Long monthId) {
+        return csvResponse("admin-report-" + monthId + ".csv", payrollReportService.exportAdminCsv(monthId));
     }
 
     @GetMapping("/employee/{userId}/export")
-    public ResponseEntity<byte[]> exportEmployeeReport(@PathVariable Long userId, @RequestParam Long batchId) {
-        return csvResponse("employee-report-" + userId + "-" + batchId + ".csv",
-                payrollReportService.exportEmployeeCsv(batchId, userId));
+    public ResponseEntity<byte[]> exportEmployeeReport(@PathVariable Long userId, @RequestParam Long monthId) {
+        return csvResponse("employee-report-" + userId + "-" + monthId + ".csv",
+                payrollReportService.exportEmployeeCsv(monthId, userId));
     }
 
     private ResponseEntity<byte[]> csvResponse(String filename, byte[] content) {

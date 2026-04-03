@@ -1,8 +1,7 @@
 package com.payroll.backend.report;
 
 public record EmployeeMerchantReportResponse(
-        Long merchantId,
-        Long externalMerchantId,
+        String merchantId,
         String name,
         String processor,
         double salesVolume,
